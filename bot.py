@@ -35,7 +35,7 @@ s3 = boto3.client(
 
 async def insert_episode(video_url: str, caption: str):
     async with httpx.AsyncClient() as client:
-        # Pega a contagem atual de episódios
+        # Pega a contagem atual de episódios DA SÉRIE
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/telegram_episodes?series_id=eq.{SERIES_ID}&select=id",
             headers={
@@ -43,25 +43,30 @@ async def insert_episode(video_url: str, caption: str):
                 "Authorization": f"Bearer {SUPABASE_KEY}"
             }
         )
-        count = len(res.json())
+        
+        episodes = res.json()
+        count = len(episodes) if isinstance(episodes, list) else 0
+        next_order = count + 1
+        
+        print(f"Episódios existentes: {count}, próximo order: {next_order}")
 
         # Insere o episódio
-        await client.post(
+        insert_res = await client.post(
             f"{SUPABASE_URL}/rest/v1/telegram_episodes",
             headers={
                 "apikey": SUPABASE_KEY,
                 "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "Prefer": "return=representation"
             },
             json={
                 "series_id": SERIES_ID,
                 "file_id": video_url,
                 "caption": caption,
-                "episode_order": count + 1
+                "episode_order": next_order
             }
         )
-        print(f"Episódio salvo no Supabase: {video_url}")
-
+        print(f"Episódio salvo no Supabase: {video_url} (order: {next_order})")
 @app.on_message(filters.video | filters.document)
 async def handle_video(client: Client, message: Message):
     chat_id = message.chat.id
