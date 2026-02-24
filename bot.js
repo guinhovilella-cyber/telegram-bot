@@ -1,103 +1,84 @@
-const TelegramBot = require('node-telegram-bot-api');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
-const http = require('http');
+import asyncio
+import os
+import boto3
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-const TOKEN = process.env.BOT_TOKEN;
-const TARGET_GROUP = process.env.TARGET_GROUP;
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
-const R2_ACCESS_KEY = process.env.R2_ACCESS_KEY;
-const R2_SECRET_KEY = process.env.R2_SECRET_KEY;
-const R2_BUCKET = process.env.R2_BUCKET;
-const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+TARGET_GROUP = int(os.environ.get("TARGET_GROUP"))
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
+R2_BUCKET = os.environ.get("R2_BUCKET")
+R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL")
 
-const bot = new TelegramBot(TOKEN, { polling: true });
+# Cliente do bot
+app = Client(
+    "doramixx_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY,
-    secretAccessKey: R2_SECRET_KEY,
-  },
-});
+# Cliente R2
+s3 = boto3.client(
+    "s3",
+    endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+    aws_access_key_id=R2_ACCESS_KEY,
+    aws_secret_access_key=R2_SECRET_KEY,
+    region_name="auto"
+)
 
-console.log('Bot iniciado! Aguardando vídeos...');
+async def upload_to_r2(file_path: str, file_name: str) -> str:
+    print(f"Fazendo upload de {file_name} pro R2...")
+    with open(file_path, "rb") as f:
+        s3.upload_fileobj(f, R2_BUCKET, file_name, ExtraArgs={"ContentType": "video/mp4"})
+    url = f"{R2_PUBLIC_URL}/{file_name}"
+    print(f"Upload concluído: {url}")
+    return url
 
-async function processVideo(msg, fileId, caption) {
-  const chatId = msg.chat.id;
+@app.on_message(filters.video | filters.document)
+async def handle_video(client: Client, message: Message):
+    chat_id = message.chat.id
+    caption = message.caption or ""
 
-  try {
-    await bot.sendMessage(chatId, '⏳ Processando vídeo...');
+    # Verifica se é vídeo
+    if message.document and not message.document.mime_type.startswith("video/"):
+        return
 
-    // Pega o link do arquivo via Telegram API
-    const file = await bot.getFile(fileId);
-    const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
-    const fileName = `${Date.now()}_${path.basename(file.file_path)}`;
-    const tmpPath = `/tmp/${fileName}`;
+    await message.reply("⏳ Processando vídeo...")
 
-    console.log(`Baixando: ${fileUrl}`);
-    await bot.sendMessage(chatId, '⬇️ Baixando vídeo...');
-    await downloadFile(fileUrl, tmpPath);
+    try:
+        # Baixa o vídeo sem limite de tamanho
+        await message.reply("⬇️ Baixando vídeo... pode demorar um pouco")
+        
+        import time
+        file_name = f"{int(time.time())}.mp4"
+        tmp_path = f"/tmp/{file_name}"
+        
+        await message.download(file_name=tmp_path)
+        print(f"Download concluído: {tmp_path}")
 
-    console.log(`Fazendo upload pro R2: ${fileName}`);
-    await bot.sendMessage(chatId, '⬆️ Enviando pro servidor...');
+        # Upload pro R2
+        await message.reply("⬆️ Enviando pro servidor...")
+        video_url = await upload_to_r2(tmp_path, file_name)
 
-    const fileBuffer = fs.readFileSync(tmpPath);
-    await s3.send(new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: fileName,
-      Body: fileBuffer,
-      ContentType: 'video/mp4',
-    }));
+        # Envia a URL pro grupo destino
+        await client.send_message(
+            TARGET_GROUP,
+            f"VIDEO_URL:{video_url}\nCAPTION:{caption}"
+        )
 
-    const videoUrl = `${R2_PUBLIC_URL}/${fileName}`;
-    console.log(`URL pública: ${videoUrl}`);
+        # Remove arquivo temporário
+        os.remove(tmp_path)
 
-    // Envia a URL pro grupo destino como mensagem
-    await bot.sendMessage(TARGET_GROUP, videoUrl, {
-      caption: caption || '',
-    });
+        await message.reply(f"✅ Vídeo enviado com sucesso!\n\n🔗 {video_url}")
 
-    // Também envia o vídeo com a URL no caption pro webhook capturar
-    await bot.sendMessage(TARGET_GROUP, `VIDEO_URL:${videoUrl}\nCAPTION:${caption || ''}`);
+    except Exception as e:
+        print(f"Erro: {e}")
+        await message.reply(f"❌ Erro: {str(e)}")
 
-    fs.unlinkSync(tmpPath);
-
-    await bot.sendMessage(chatId, `✅ Vídeo enviado com sucesso!\n\n🔗 URL: ${videoUrl}`);
-
-  } catch (err) {
-    console.error('Erro:', err);
-    await bot.sendMessage(chatId, '❌ Erro: ' + err.message);
-  }
-}
-
-bot.on('video', async (msg) => {
-  await processVideo(msg, msg.video.file_id, msg.caption);
-});
-
-bot.on('document', async (msg) => {
-  if (!msg.document.mime_type?.startsWith('video/')) return;
-  await processVideo(msg, msg.document.file_id, msg.caption);
-});
-
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
-    const protocol = url.startsWith('https') ? https : http;
-    protocol.get(url, (response) => {
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        file.close();
-        downloadFile(response.headers.location, dest).then(resolve).catch(reject);
-        return;
-      }
-      response.pipe(file);
-      file.on('finish', () => file.close(resolve));
-    }).on('error', (err) => {
-      fs.unlink(dest, () => {});
-      reject(err);
-    });
-  });
-}
+print("Bot iniciado!")
+app.run()
