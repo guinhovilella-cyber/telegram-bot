@@ -1,12 +1,13 @@
 {
-  "name": "telegram-video-bot",
+  "name": "telegram-video-bot-r2",
   "version": "1.0.0",
-  "description": "Bot intermediário para reenviar vídeos do Telegram",
+  "description": "Bot que envia vídeos do Telegram para Cloudflare R2",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.64.0"
+    "node-telegram-bot-api": "^0.64.0",
+    "@aws-sdk/client-s3": "^3.0.0"
   }
 }
