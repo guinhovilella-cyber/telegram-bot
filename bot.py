@@ -1,20 +1,23 @@
 import asyncio
 import os
+import time
 import boto3
+import httpx
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-TARGET_GROUP = int(os.environ.get("TARGET_GROUP"))
 R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
 R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
 R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
 R2_BUCKET = os.environ.get("R2_BUCKET")
 R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SERIES_ID = os.environ.get("SERIES_ID")  # ID da série na tabela telegram_series
 
-# Cliente do bot
 app = Client(
     "doramixx_bot",
     api_id=API_ID,
@@ -22,7 +25,6 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# Cliente R2
 s3 = boto3.client(
     "s3",
     endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
@@ -31,50 +33,60 @@ s3 = boto3.client(
     region_name="auto"
 )
 
-async def upload_to_r2(file_path: str, file_name: str) -> str:
-    print(f"Fazendo upload de {file_name} pro R2...")
-    with open(file_path, "rb") as f:
-        s3.upload_fileobj(f, R2_BUCKET, file_name, ExtraArgs={"ContentType": "video/mp4"})
-    url = f"{R2_PUBLIC_URL}/{file_name}"
-    print(f"Upload concluído: {url}")
-    return url
+async def insert_episode(video_url: str, caption: str):
+    async with httpx.AsyncClient() as client:
+        # Pega a contagem atual de episódios
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/telegram_episodes?series_id=eq.{SERIES_ID}&select=id",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}"
+            }
+        )
+        count = len(res.json())
+
+        # Insere o episódio
+        await client.post(
+            f"{SUPABASE_URL}/rest/v1/telegram_episodes",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "series_id": SERIES_ID,
+                "file_id": video_url,
+                "caption": caption,
+                "episode_order": count + 1
+            }
+        )
+        print(f"Episódio salvo no Supabase: {video_url}")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client: Client, message: Message):
     chat_id = message.chat.id
     caption = message.caption or ""
 
-    # Verifica se é vídeo
     if message.document and not message.document.mime_type.startswith("video/"):
         return
 
     await message.reply("⏳ Processando vídeo...")
 
     try:
-        # Baixa o vídeo sem limite de tamanho
-        await message.reply("⬇️ Baixando vídeo... pode demorar um pouco")
-        
-        import time
+        await message.reply("⬇️ Baixando vídeo...")
         file_name = f"{int(time.time())}.mp4"
         tmp_path = f"/tmp/{file_name}"
-        
         await message.download(file_name=tmp_path)
-        print(f"Download concluído: {tmp_path}")
 
-        # Upload pro R2
         await message.reply("⬆️ Enviando pro servidor...")
-        video_url = await upload_to_r2(tmp_path, file_name)
+        with open(tmp_path, "rb") as f:
+            s3.upload_fileobj(f, R2_BUCKET, file_name, ExtraArgs={"ContentType": "video/mp4"})
 
-        # Envia a URL pro grupo destino
-        await client.send_message(
-            TARGET_GROUP,
-            f"VIDEO_URL:{video_url}\nCAPTION:{caption}"
-        )
-
-        # Remove arquivo temporário
+        video_url = f"{R2_PUBLIC_URL}/{file_name}"
         os.remove(tmp_path)
 
-        await message.reply(f"✅ Vídeo enviado com sucesso!\n\n🔗 {video_url}")
+        await insert_episode(video_url, caption)
+        await message.reply(f"✅ Vídeo salvo com sucesso!\n\n🔗 {video_url}")
 
     except Exception as e:
         print(f"Erro: {e}")
