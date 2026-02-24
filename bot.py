@@ -67,6 +67,35 @@ async def insert_episode(video_url: str, caption: str):
             }
         )
         print(f"Episódio salvo no Supabase: {video_url} (order: {next_order})")
+@app.on_message(filters.photo)
+async def handle_photo(client: Client, message: Message):
+    """Captura foto e atualiza capa da série"""
+    try:
+        file_name = f"{int(time.time())}.jpg"
+        tmp_path = f"/tmp/{file_name}"
+        await message.download(file_name=tmp_path)
+
+        with open(tmp_path, "rb") as f:
+            s3.upload_fileobj(f, R2_BUCKET, file_name, ExtraArgs={"ContentType": "image/jpeg"})
+
+        cover_url = f"{R2_PUBLIC_URL}/{file_name}"
+        os.remove(tmp_path)
+
+        async with httpx.AsyncClient() as http:
+            await http.patch(
+                f"{SUPABASE_URL}/rest/v1/telegram_series?id=eq.{SERIES_ID}",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={"cover_url": cover_url}
+            )
+
+        await message.reply(f"✅ Capa atualizada!")
+
+    except Exception as e:
+        await message.reply(f"❌ Erro: {str(e)}")
 @app.on_message(filters.video | filters.document)
 async def handle_video(client: Client, message: Message):
     chat_id = message.chat.id
